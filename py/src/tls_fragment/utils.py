@@ -1,6 +1,8 @@
 import ipaddress
 import socket
 import struct
+from .log import logger
+logger = logger.getChild("utils")
 
 def expand_pattern(s):
     left_index, right_index = s.find('('), s.find(')')
@@ -43,6 +45,7 @@ def ip_to_binary_prefix(ip_or_network:str):
             return binary_prefix
         except ValueError:
             raise ValueError(f"input {ip_or_network} is not a valid IP or network address")
+
 
 def calc_redirect_ip(ip_str:str, mapper_str:str):
     # 自动补全默认前缀
@@ -138,8 +141,6 @@ def check_ttl(ip, port, ttl):
         sock.close()
         return True
     except Exception as e:
-        from .log import logger
-        logger = logger.getChild("utils")
         logger.warning(f'check_ttl error: {repr(e)}')
         return False
     finally:
@@ -147,8 +148,6 @@ def check_ttl(ip, port, ttl):
 
 
 def get_ttl(ip, port):
-    from .log import logger
-    logger = logger.getChild("utils")
     l = 1
     r = 32
     ans = -1
@@ -164,14 +163,6 @@ def get_ttl(ip, port):
 
     logger.info("get_ttl %s %d %d", ip, port, ans)
     return ans
-
-
-def is_ip_address(s):
-    try:
-        ipaddress.ip_address(s)
-        return True
-    except ValueError:
-        return False
 
 
 def extract_sni(data):
@@ -365,7 +356,63 @@ def detect_tls_version_by_keyshare(data):
         return -1
     except Exception:
         return 0
+    
+def generate_tls_alert(data):
+    '''Send fake TLS Alert message to the client'''
+    record_type, version_major, version_minor, record_length = struct.unpack('!BBBH', data[:5])
+    alert_type = 0x15
+    alert_level = 0x02  # Fatal level
+    alert_description = 0x46
+    alert_payload = bytes((alert_level, alert_description))
+    record_header = struct.pack(
+        ">BHH",
+        alert_type,
+        (version_major << 8) | version_minor,
+        len(alert_payload)
+    )
+    return record_header + alert_payload
 
+def generate_302(data,domain):
+    lines = data.decode().split("\r\n")
+    request_line = lines[0].split()
+    q_method, q_url = request_line[0], request_line[1]
+    
+    # 提取Host头
+    host = None
+    for line in lines[1:]:
+        if line.lower().startswith('host:'):
+            host = line.split(':', 1)[1].strip()
+            break
+    
+    # 构建完整的HTTPS URL
+    if q_url.startswith('http://'):
+        https_url = q_url.replace("http://", "https://", 1)
+    elif q_url.startswith('/'):
+        # 相对路径，需要结合Host头
+        if host:
+            https_url = f"https://{host}{q_url}"
+        else:
+            https_url = f"https://{domain}{q_url}"
+    else:
+        # 其他情况（相对路径无/前缀）
+        if host:
+            https_url = f"https://{host}/{q_url}"
+        else:
+            https_url = f"https://{domain}/{q_url}"
+            return
+        
+    logger.info(f"重定向 {q_method} 到 HTTPS: {https_url}")
+
+    # 正确的302重定向响应
+    response = (
+        f"HTTP/1.1 302 Found\r\n"
+        f"Location: {https_url}\r\n"
+        f"Content-Length: 0\r\n"
+        f"Proxy-agent: MyProxy/1.0\r\n"
+        f"\r\n"
+    )
+    logger.debug(response)
+    return response
 
 def is_udp_dns_query(data):
     if len(data) < 12:
@@ -476,3 +523,21 @@ def build_socks5_udp_ans(address,port,data):
     hdr_len=len(addr)+3
     msg_len=len(data)+hdr_len
     return msg_len.to_bytes(2,'big')+hdr_len.to_bytes(1,'big')+addr+data
+
+def find_second_last_dot(data: bytes) -> int:
+    """
+    查找 bytes 对象中倒数第二个 b'.' 的位置
+    
+    参数:
+    data -- 要搜索的 bytes 对象
+    
+    返回:
+    倒数第二个 b'.' 的索引位置，如果不足两个点则返回 -1
+    """
+    # 先找到最后一个点的位置
+    last_dot = data.rfind(b'.')
+    if last_dot == -1:
+        return -1  # 没有任何点
+    
+    # 在最后一个点之前的部分查找倒数第二个点
+    return data.rfind(b'.', 0, last_dot)
